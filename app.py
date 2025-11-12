@@ -7,9 +7,13 @@ import torch.nn as nn
 import torchvision.transforms as transforms
 import io
 
+# ============================================================
+# 1️⃣ App Configuration
+# ============================================================
+
 app = FastAPI(title="Medical Image Anomaly Detector API")
 
-# ======== Allow frontend requests ========
+# Allow all origins (safe for Hugging Face Space)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,7 +22,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ======== CNN Architecture (matches retrained .pth) ========
+# ============================================================
+# 2️⃣ Model Definition
+# ============================================================
+
 class SimpleCNN(nn.Module):
     def __init__(self, num_classes=2):
         super(SimpleCNN, self).__init__()
@@ -31,8 +38,12 @@ class SimpleCNN(nn.Module):
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
 
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+
             nn.Flatten(),
-            nn.Linear(32 * 56 * 56, 128),   # Adjust based on your training input size
+            nn.Linear(64 * 28 * 28, 128),
             nn.ReLU(),
             nn.Linear(128, num_classes)
         )
@@ -40,85 +51,95 @@ class SimpleCNN(nn.Module):
     def forward(self, x):
         return self.sequential_model(x)
 
-# ======== Load all retrained models ========
-MODELS = {}
-class_names = ["Normal", "Abnormal"]
+# ============================================================
+# 3️⃣ Image Preprocessing
+# ============================================================
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
 ])
 
-def load_model(path):
-    model = SimpleCNN(num_classes=2)
-    state_dict = torch.load(path, map_location="cpu")
-    model.load_state_dict(state_dict)
-    model.eval()
-    return model
+# ============================================================
+# 4️⃣ Model Loading Logic
+# ============================================================
 
-def load_models():
-    global MODELS
+MODELS = {}
+
+def load_model(model_path, modality):
     try:
-        print("🔄 Loading XRAY model...")
-        MODELS["xray"] = load_model("model_xray_retrained_final_arch.pth")
-        print("✅ XRAY model loaded.")
+        model = SimpleCNN(num_classes=2)
+        state_dict = torch.load(model_path, map_location="cpu")
 
-        print("🔄 Loading MRI model...")
-        MODELS["mri"] = load_model("model_mri_retrained_final_arch.pth")
-        print("✅ MRI model loaded.")
+        # Handle mismatched layer names
+        if "sequential_model.10.weight" in state_dict:
+            new_state_dict = {}
+            for key, val in state_dict.items():
+                new_key = key.replace("10", "9") if "10" in key else key
+                new_state_dict[new_key] = val
+            state_dict = new_state_dict
 
-        print("🔄 Loading CT model...")
-        MODELS["ct"] = load_model("model_ct_retrained_final_arch.pth")
-        print("✅ CT model loaded.")
+        model.load_state_dict(state_dict, strict=False)
+        model.eval()
+        print(f"✅ Successfully loaded {modality.upper()} model from: {model_path}")
+        return model
 
-        print(f"📊 Final MODELS keys: {list(MODELS.keys())}")
-        print("🚀 All models loaded successfully.")
     except Exception as e:
-        print("❌ Model loading failed:", e)
+        print(f"❌ Failed to load {modality.upper()} model:", e)
+        return None
 
-load_models()
 
-# ======== Inference ========
-def predict_image(image: Image.Image, model):
-    image_tensor = transform(image).unsqueeze(0)
-    with torch.no_grad():
-        outputs = model(image_tensor)
-        probs = torch.nn.functional.softmax(outputs, dim=1)
-        pred_idx = torch.argmax(probs, dim=1).item()
-        confidence = probs[0][pred_idx].item()
-    return class_names[pred_idx], confidence
+def load_all_models():
+    global MODELS
+    MODELS["xray"] = load_model("model_xray_retrained_final_arch.pth", "xray")
+    MODELS["mri"] = load_model("model_mri_retrained_final_arch.pth", "mri")
+    MODELS["ct"] = load_model("model_ct_retrained_final_arch.pth", "ct")
+    print(f"📊 Loaded models: {list(MODELS.keys())}")
 
-# ======== Endpoint ========
+load_all_models()
+
+# ============================================================
+# 5️⃣ Inference Endpoint
+# ============================================================
+
 @app.post("/api/analyze")
 async def analyze_image(file: UploadFile = File(...), modality: str = Form(...)):
-    if modality not in MODELS:
-        return JSONResponse(status_code=400, content={"error": f"Invalid modality: {modality}"})
+    if modality not in MODELS or MODELS[modality] is None:
+        return JSONResponse(status_code=400, content={"error": f"Invalid or unloaded modality: {modality}"})
 
     try:
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
+        input_tensor = transform(image).unsqueeze(0)
 
         model = MODELS[modality]
-        pred_label, confidence = predict_image(image, model)
+        with torch.no_grad():
+            outputs = model(input_tensor)
+            probs = torch.softmax(outputs, dim=1)
+            predicted_class = torch.argmax(probs, dim=1).item()
 
-        suggestion = (
-            "No visible anomaly detected."
-            if pred_label == "Normal"
-            else "Potential anomaly detected. Please consult a specialist."
-        )
-
-        print(f"[{modality.upper()}] Prediction: {pred_label} ({confidence:.3f})")
+        # class 0 = Normal, class 1 = Abnormal
+        if predicted_class == 0:
+            prediction = "Normal"
+            recommendation = "No visible anomaly detected. Continue regular check-ups."
+        else:
+            prediction = "Abnormal"
+            recommendation = "Potential anomaly detected. Please consult a specialist."
 
         return {
-            "predicted_label": pred_label,
-            "confidence": round(confidence, 3),
-            "suggestion": suggestion,
+            "predicted_label": prediction,
+            "confidence": f"{100 * probs[0][predicted_class]:.2f}%",
+            "suggestion": recommendation,
             "modality": modality
         }
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+# ============================================================
+# 6️⃣ Root Endpoint
+# ============================================================
+
 @app.get("/")
 def root():
-    return {"message": "Medical Image Anomaly Detector API Running"}
+    return {"message": "✅ Medical Image Anomaly Detector API Running Successfully!"}
