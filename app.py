@@ -13,7 +13,6 @@ import io
 
 app = FastAPI(title="Medical Image Anomaly Detector API")
 
-# Allow all origins (safe for Hugging Face Space)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -61,17 +60,34 @@ transform = transforms.Compose([
 ])
 
 # ============================================================
-# 4️⃣ Model Loading Logic
+# 4️⃣ Define Class Labels (Anomaly Mapping)
+# ============================================================
+
+CLASS_LABELS = {
+    "xray": ["Normal", "Pneumonia Detected"],
+    "mri": ["Normal", "Brain Tumor Detected"],
+    "ct": ["Normal", "Lung Cancer Detected"]
+}
+
+RECOMMENDATIONS = {
+    "Normal": "No visible anomaly detected. Continue regular health check-ups.",
+    "Pneumonia Detected": "Signs of pneumonia detected. Consult a pulmonologist for further evaluation.",
+    "Brain Tumor Detected": "Abnormal brain tissue detected. Immediate consultation with a neurologist is recommended.",
+    "Lung Cancer Detected": "Possible malignant growth detected. Consult an oncologist for confirmation and treatment planning."
+}
+
+# ============================================================
+# 5️⃣ Model Loading Logic
 # ============================================================
 
 MODELS = {}
 
 def load_model(model_path, modality):
     try:
-        model = SimpleCNN(num_classes=2)
+        model = SimpleCNN(num_classes=len(CLASS_LABELS[modality]))
         state_dict = torch.load(model_path, map_location="cpu")
 
-        # Handle mismatched layer names
+        # Handle mismatched layer names if needed
         if "sequential_model.10.weight" in state_dict:
             new_state_dict = {}
             for key, val in state_dict.items():
@@ -83,7 +99,6 @@ def load_model(model_path, modality):
         model.eval()
         print(f"✅ Successfully loaded {modality.upper()} model from: {model_path}")
         return model
-
     except Exception as e:
         print(f"❌ Failed to load {modality.upper()} model:", e)
         return None
@@ -99,11 +114,12 @@ def load_all_models():
 load_all_models()
 
 # ============================================================
-# 5️⃣ Inference Endpoint
+# 6️⃣ Inference Endpoint
 # ============================================================
 
 @app.post("/api/analyze")
 async def analyze_image(file: UploadFile = File(...), modality: str = Form(...)):
+    modality = modality.lower()
     if modality not in MODELS or MODELS[modality] is None:
         return JSONResponse(status_code=400, content={"error": f"Invalid or unloaded modality: {modality}"})
 
@@ -118,28 +134,34 @@ async def analyze_image(file: UploadFile = File(...), modality: str = Form(...))
             probs = torch.softmax(outputs, dim=1)
             predicted_class = torch.argmax(probs, dim=1).item()
 
-        # class 0 = Normal, class 1 = Abnormal
-        if predicted_class == 0:
-            prediction = "Normal"
-            recommendation = "No visible anomaly detected. Continue regular check-ups."
-        else:
-            prediction = "Abnormal"
-            recommendation = "Potential anomaly detected. Please consult a specialist."
+        detected_label = CLASS_LABELS[modality][predicted_class]
+        confidence = float(probs[0][predicted_class]) * 100
 
-        return {
-            "predicted_label": prediction,
-            "confidence": f"{100 * probs[0][predicted_class]:.2f}%",
+        recommendation = RECOMMENDATIONS.get(
+            detected_label,
+            "Please consult a medical professional for accurate diagnosis."
+        )
+
+        result = {
+            "predicted_label": detected_label,
+            "confidence": f"{confidence:.2f}%",
             "suggestion": recommendation,
-            "modality": modality
+            "modality": modality.upper(),
         }
+
+        return result
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 # ============================================================
-# 6️⃣ Root Endpoint
+# 7️⃣ Root Endpoint
 # ============================================================
 
 @app.get("/")
 def root():
-    return {"message": "✅ Medical Image Anomaly Detector API Running Successfully!"}
+    return {
+        "message": "✅ Medical Image Anomaly Detector API Running Successfully!",
+        "available_modalities": list(MODELS.keys()),
+        "class_labels": CLASS_LABELS
+    }
