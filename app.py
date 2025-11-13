@@ -7,9 +7,7 @@ import torch.nn as nn
 import torchvision.transforms as transforms
 import io
 
-# ============================================================
-# 1️⃣ App Configuration
-# ============================================================
+
 
 app = FastAPI(title="Medical Image Anomaly Detector API")
 
@@ -21,9 +19,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ============================================================
-# 2️⃣ Model Definition
-# ============================================================
+
 
 class SimpleCNN(nn.Module):
     def __init__(self, num_classes=2):
@@ -50,18 +46,14 @@ class SimpleCNN(nn.Module):
     def forward(self, x):
         return self.sequential_model(x)
 
-# ============================================================
-# 3️⃣ Image Preprocessing
-# ============================================================
+
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
 ])
 
-# ============================================================
-# 4️⃣ Define Class Labels (Anomaly Mapping)
-# ============================================================
+
 
 CLASS_LABELS = {
     "xray": ["Normal", "Pneumonia Detected"],
@@ -76,9 +68,7 @@ RECOMMENDATIONS = {
     "Lung Cancer Detected": "Possible malignant growth detected. Consult an oncologist for confirmation and treatment planning."
 }
 
-# ============================================================
-# 5️⃣ Model Loading Logic
-# ============================================================
+
 
 MODELS = {}
 
@@ -113,9 +103,7 @@ def load_all_models():
 
 load_all_models()
 
-# ============================================================
-# 6️⃣ Inference Endpoint
-# ============================================================
+
 
 @app.post("/api/analyze")
 async def analyze_image(file: UploadFile = File(...), modality: str = Form(...)):
@@ -154,9 +142,7 @@ async def analyze_image(file: UploadFile = File(...), modality: str = Form(...))
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# ============================================================
-# 7️⃣ Root Endpoint
-# ============================================================
+
 
 @app.get("/")
 def root():
